@@ -33,11 +33,15 @@ async function handleMessage({ type, payload = {} }) {
     case 'scroll':         return scroll(payload);
     case 'hover':          return hover(payload);
     case 'select_option':  return selectOption(payload);
+    case 'click_text':     return clickText(payload);
+    case 'find_text_rect': return findTextRect(payload);
+    case 'upload_file':    return uploadFile(payload);
     case 'wait':           return waitFor(payload);
     case 'find':           return findElement(payload);
     case 'page_links':     return pageLinks();
     case 'page_forms':     return pageForms();
     case 'element_state':  return elementState(payload);
+    case 'dom_find':       return domFind(payload);
     case 'evaluate':       return evaluate(payload);
     case 'page_text':      return pageText();
     case 'page_html':      return pageHtml(payload);
@@ -390,6 +394,298 @@ async function selectOption({ ref, selector, value, label }) {
   return { selected: option.textContent.trim(), value: option.value };
 }
 
+// ─── Text Click (for portal-rendered custom dropdowns) ─────────
+
+async function clickText({ text, exact = true, selector }) {
+  const target = await getTextClickTarget({ text, exact, selector });
+
+  fireMouseEvent(target.el, 'mousedown', target.x, target.y, 'left');
+  fireMouseEvent(target.el, 'mouseup', target.x, target.y, 'left');
+  target.el.click();
+  await sleep(100);
+  return { clicked: text };
+}
+
+async function findTextRect({ text, exact = true, selector }) {
+  const target = await getTextClickTarget({ text, exact, selector });
+  return {
+    text: normalizeText(target.el.innerText || target.el.textContent || ''),
+    tag: target.el.tagName.toLowerCase(),
+    role: target.el.getAttribute('role') || null,
+    x: target.x,
+    y: target.y,
+  };
+}
+
+async function getTextClickTarget({ text, exact = true, selector }) {
+  const root = selector ? document.querySelector(selector) : document.body;
+  if (!root) throw new Error(`Selector not found: ${selector}`);
+
+  const target = findVisibleTextElement(root, text, exact);
+  if (!target) throw new Error(`Visible text not found: ${text}`);
+  const el = findClickableAncestor(target) || target;
+
+  el.scrollIntoView({ block: 'center', behavior: 'instant' });
+  await sleep(50);
+  const rect = el.getBoundingClientRect();
+  return {
+    el,
+    x: rect.left + rect.width / 2,
+    y: rect.top + rect.height / 2,
+  };
+}
+
+function findVisibleTextElement(root, text, exact) {
+  const candidates = Array.from(root.querySelectorAll([
+    '[role="option"]',
+    '[role="menuitem"]',
+    '[role="listitem"]',
+    '[role="button"]',
+    'li',
+    'div',
+    'span',
+    'button',
+    'a',
+  ].join(',')));
+
+  const normalizedTarget = normalizeText(text);
+  const matches = candidates
+    .filter(isVisible)
+    .filter(el => {
+      const candidateText = normalizeText(el.innerText || el.textContent || '');
+      return exact ? candidateText === normalizedTarget : candidateText.includes(normalizedTarget);
+    })
+    .sort((a, b) => scoreTextMatchCandidate(b, normalizedTarget) - scoreTextMatchCandidate(a, normalizedTarget));
+
+  return matches[0] || null;
+}
+
+function domFind({ text, selector, exact = false, visibleOnly = true, limit = 20 } = {}) {
+  const root = selector ? document.querySelector(selector) : document;
+  if (!root) throw new Error(`Selector not found: ${selector}`);
+
+  const candidates = collectDomElements(root)
+    .filter(el => !visibleOnly || isVisible(el))
+    .filter(el => {
+      if (!text) return true;
+      const candidateText = normalizeText(el.innerText || el.textContent || '');
+      const targetText = normalizeText(text);
+      return exact ? candidateText === targetText : candidateText.includes(targetText);
+    })
+    .sort((a, b) => scoreDomFindCandidate(b, text) - scoreDomFindCandidate(a, text))
+    .slice(0, Math.max(1, Math.min(limit, 100)))
+    .map(describeElement);
+
+  return { matches: candidates, count: candidates.length };
+}
+
+function collectDomElements(root) {
+  const out = [];
+  const visit = (node) => {
+    if (!node) return;
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      out.push(node);
+      if (node.shadowRoot) visit(node.shadowRoot);
+    }
+    for (const child of node.children || []) visit(child);
+  };
+  visit(root);
+  return out;
+}
+
+function scoreDomFindCandidate(el, text) {
+  const clickTarget = findClickableAncestor(el) || el;
+  let score = scoreTextClickCandidate(clickTarget);
+  const tag = el.tagName;
+  if (['HTML', 'BODY', 'SCRIPT', 'STYLE'].includes(tag)) score -= 100;
+  if (text) {
+    const candidateText = normalizeText(el.innerText || el.textContent || '');
+    const targetText = normalizeText(text);
+    if (candidateText === targetText) score += 60;
+    score -= Math.min(40, Math.max(0, candidateText.length - targetText.length) / 5);
+  }
+  return score;
+}
+
+function describeElement(el) {
+  const rect = el.getBoundingClientRect();
+  const clickTarget = findClickableAncestor(el) || el;
+  const clickRect = clickTarget.getBoundingClientRect();
+  return {
+    selector: cssPath(el),
+    clickSelector: cssPath(clickTarget),
+    clickTag: clickTarget.tagName.toLowerCase(),
+    clickRole: clickTarget.getAttribute('role') || inferRole(clickTarget),
+    clickClassName: typeof clickTarget.className === 'string' ? clickTarget.className.slice(0, 200) : '',
+    tag: el.tagName.toLowerCase(),
+    role: el.getAttribute('role') || inferRole(el),
+    text: normalizeText(el.innerText || el.textContent || '').slice(0, 200),
+    ariaLabel: el.getAttribute('aria-label'),
+    ariaSelected: el.getAttribute('aria-selected'),
+    ariaExpanded: el.getAttribute('aria-expanded'),
+    className: typeof el.className === 'string' ? el.className.slice(0, 200) : '',
+    id: el.id || null,
+    visible: isVisible(el),
+    rect: {
+      x: Math.round(rect.left),
+      y: Math.round(rect.top),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+    },
+    clickRect: {
+      x: Math.round(clickRect.left),
+      y: Math.round(clickRect.top),
+      width: Math.round(clickRect.width),
+      height: Math.round(clickRect.height),
+    },
+  };
+}
+
+function cssPath(el) {
+  if (el.id) return `#${CSS.escape(el.id)}`;
+  const parts = [];
+  let current = el;
+  while (current && current.nodeType === Node.ELEMENT_NODE && current !== document.body) {
+    let part = current.tagName.toLowerCase();
+    const classes = typeof current.className === 'string'
+      ? current.className.trim().split(/\s+/).filter(Boolean).slice(0, 3)
+      : [];
+    if (classes.length) part += classes.map(cls => `.${CSS.escape(cls)}`).join('');
+    const parent = current.parentElement;
+    if (parent) {
+      const siblings = Array.from(parent.children).filter(child => child.tagName === current.tagName);
+      if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+    }
+    parts.unshift(part);
+    current = parent;
+  }
+  return parts.length ? parts.join(' > ') : current?.tagName?.toLowerCase() || '';
+}
+
+function findClickableAncestor(el) {
+  const candidates = [];
+  let current = el;
+  while (current && current.nodeType === Node.ELEMENT_NODE && current !== document.body) {
+    candidates.push(current);
+    current = current.parentElement;
+  }
+
+  return candidates
+    .filter(isVisible)
+    .map(candidate => ({ candidate, score: scoreTextClickCandidate(candidate) }))
+    .filter(item => item.score > 0)
+    .sort((a, b) => b.score - a.score)[0]?.candidate || null;
+}
+
+function scoreTextMatchCandidate(el, normalizedTarget) {
+  const candidateText = normalizeText(el.innerText || el.textContent || '');
+  const clickTarget = findClickableAncestor(el) || el;
+  let score = scoreTextClickCandidate(clickTarget);
+  if (candidateText === normalizedTarget) score += 80;
+  score -= Math.min(40, Math.max(0, candidateText.length - normalizedTarget.length) / 4);
+  if (el !== clickTarget) score += 10;
+  return score;
+}
+
+function scoreTextClickCandidate(el) {
+  let score = 0;
+  const role = el.getAttribute('role');
+  const className = typeof el.className === 'string' ? el.className.toLowerCase() : '';
+  const attrText = [
+    el.getAttribute('data-value'),
+    el.getAttribute('data-key'),
+    el.getAttribute('value'),
+  ].filter(Boolean).join(' ');
+
+  if (role === 'option') score += 50;
+  if (role === 'menuitem' || role === 'listitem') score += 30;
+  if (role === 'button') score += 10;
+  if (['LI', 'BUTTON', 'A'].includes(el.tagName)) score += 20;
+  if (el.hasAttribute('data-value') || el.hasAttribute('data-key')) score += 35;
+  if (el.hasAttribute('aria-selected')) score += 30;
+  if (/\b(option|item|select|dropdown|drop-down|list|result|choice)\b/i.test(className)) score += 35;
+  if (/\b(menu|content)\b/i.test(className)) score += 8;
+  if (/\b(label|text)\b/i.test(className)) score += 4;
+  if (/\b(header|container|wrapper|arrow|icon|placeholder|input)\b/i.test(className)) score -= 25;
+  if (attrText) score += 12;
+  if (el.getAttribute('aria-selected') === 'true') score -= 10;
+  score -= Math.min(25, el.children.length * 2);
+  const rect = el.getBoundingClientRect();
+  if (rect.width > 0 && rect.height > 0) score += 2;
+  return score;
+}
+
+function normalizeText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+// ─── File Upload ─────────────────────────────────────────────
+
+async function uploadFile({ ref, selector, files }) {
+  if (!Array.isArray(files) || files.length === 0) {
+    throw new Error('No files provided');
+  }
+
+  const input = resolveElement(ref, selector) || findBestFileInput(files);
+  if (!input) throw new Error('No file input found');
+  if (input.tagName.toLowerCase() !== 'input' || input.type !== 'file') {
+    throw new Error('Not a file input');
+  }
+
+  const dt = new DataTransfer();
+  for (const file of files) {
+    const bytes = base64ToUint8Array(file.data);
+    dt.items.add(new File([bytes], file.name, {
+      type: file.mimeType || 'application/octet-stream',
+      lastModified: file.lastModified || Date.now(),
+    }));
+  }
+
+  input.files = dt.files;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+  await sleep(100);
+
+  return {
+    uploaded: files.map(file => ({ name: file.name, size: file.size })),
+    count: files.length,
+  };
+}
+
+function findBestFileInput(files) {
+  const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
+  if (inputs.length === 0) return null;
+  if (inputs.length === 1) return inputs[0];
+
+  const extensions = files
+    .map(file => '.' + String(file.name || '').split('.').pop().toLowerCase())
+    .filter(ext => ext.length > 1);
+
+  return inputs
+    .map(input => ({ input, score: scoreFileInput(input, extensions) }))
+    .sort((a, b) => b.score - a.score)[0].input;
+}
+
+function scoreFileInput(input, extensions) {
+  let score = 0;
+  const accept = String(input.getAttribute('accept') || '').toLowerCase();
+  for (const ext of extensions) {
+    if (accept.includes(ext)) score += 20;
+  }
+  if (accept.includes('pdf')) score += 5;
+  if (isVisible(input)) score += 3;
+  return score;
+}
+
+function base64ToUint8Array(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
 // ─── Wait ────────────────────────────────────────────────────
 
 async function waitFor({ selector, text, timeout = 10000 }) {
@@ -470,7 +766,7 @@ function elementState({ ref, selector }) {
   const el = resolveElement(ref, selector);
   if (!el) throw new Error(`Element not found: ${ref || selector}`);
   const rect = el.getBoundingClientRect();
-  const visible = rect.width > 0 && rect.height > 0 && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+  const visible = isVisible(el);
   return {
     visible,
     enabled: !el.disabled,
@@ -489,6 +785,12 @@ function resolveElement(ref, selector) {
   }
   if (selector) return document.querySelector(selector);
   return null;
+}
+
+function isVisible(el) {
+  const rect = el.getBoundingClientRect();
+  const style = getComputedStyle(el);
+  return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
 }
 
 function sleep(ms) {

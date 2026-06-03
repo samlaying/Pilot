@@ -243,10 +243,13 @@ Errors: None — this is a configuration-only call that always succeeds.`,
     'pilot_extension_status',
     `Check if the Pilot Chrome extension is connected and routing commands through the user's real browser.
 When connected, all navigation, snapshot, click, fill, type, scroll, screenshot, and tab commands route through Chrome — bypassing Cloudflare and bot detection.
+Use when the user wants to verify extension connectivity, debug routing through the real browser, or confirm which session tab is attached.
 
 Parameters: (none)
 
-Returns: Connection status, port, and instructions for installing the extension if not connected.`,
+Returns: Connection status, port, and instructions for installing the extension if not connected.
+
+Errors: None — this status check is read-only and always returns connection details.`,
     {},
     async () => {
       const { extensionServer } = await import('../extension-server.js');
@@ -368,7 +371,7 @@ Errors:
 
   server.tool(
     'pilot_auth',
-    `Save, load, or clear browser session state (cookies + localStorage + sessionStorage) to/from a JSON file.
+    `Manage browser session state (cookies + localStorage + sessionStorage) by saving, loading, or clearing it from a JSON file.
 Use when the user wants to authenticate once and reuse credentials across sessions, skip re-login flows, or transfer session state between runs. Complement to pilot_import_cookies — use pilot_auth for Pilot-managed state, pilot_import_cookies for one-time import from a real browser.
 
 Parameters:

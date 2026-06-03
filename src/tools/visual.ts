@@ -10,14 +10,31 @@ import * as path from 'path';
 
 const TEMP_DIR = process.platform === 'win32' ? os.tmpdir() : '/tmp';
 
+function resolveExistingPathPrefix(targetPath: string): string {
+  const absolute = path.resolve(targetPath);
+  const missingParts: string[] = [];
+  let current = absolute;
+
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    missingParts.unshift(path.basename(current));
+    current = parent;
+  }
+
+  let realCurrent: string;
+  try {
+    realCurrent = fs.realpathSync(current);
+  } catch {
+    realCurrent = current;
+  }
+
+  return path.join(realCurrent, ...missingParts);
+}
+
 export function validateOutputPath(outputPath: string): string {
   const allowed = process.env.PILOT_OUTPUT_DIR || os.tmpdir();
-  let normalizedAllowed: string;
-  try {
-    normalizedAllowed = fs.realpathSync(path.resolve(allowed));
-  } catch {
-    normalizedAllowed = path.resolve(allowed);
-  }
+  const normalizedAllowed = resolveExistingPathPrefix(allowed);
   try {
     const parentDir = path.dirname(outputPath);
     const realParent = fs.realpathSync(parentDir);
@@ -30,7 +47,7 @@ export function validateOutputPath(outputPath: string): string {
     if (err instanceof Error && err.message.includes('Output path must be within')) {
       throw err;
     }
-    const resolved = path.resolve(outputPath);
+    const resolved = resolveExistingPathPrefix(outputPath);
     if (!resolved.startsWith(normalizedAllowed + path.sep) && resolved !== normalizedAllowed) {
       throw new Error(`Output path must be within ${normalizedAllowed}: ${outputPath}`);
     }

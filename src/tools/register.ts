@@ -38,11 +38,13 @@ const STANDARD_TOOLS = new Set([
   // navigation
   'pilot_back', 'pilot_forward', 'pilot_reload', 'pilot_get',
   // interaction
-  'pilot_hover', 'pilot_select_option', 'pilot_scroll', 'pilot_drag',
+  'pilot_hover', 'pilot_select_option', 'pilot_click_text', 'pilot_file_upload', 'pilot_scroll', 'pilot_drag',
   // tabs
   'pilot_tabs', 'pilot_tab_new', 'pilot_tab_close', 'pilot_tab_select',
   // page reading
   'pilot_page_text', 'pilot_page_html',
+  // inspection
+  'pilot_dom_find',
   // visual
   'pilot_annotated_screenshot',
   // iframe

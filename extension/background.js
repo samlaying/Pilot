@@ -12,9 +12,13 @@
 
 const WS_URL = 'ws://127.0.0.1:3131';
 const RECONNECT_DELAY = 3000;
+const KEEPALIVE_INTERVAL = 20000;
+const RECONNECT_ALARM = 'pilot-reconnect';
+const INTERNAL_URL_RE = /^(chrome|edge|moz)-extension:\/\/|^(chrome|edge):\/\/|^devtools:\/\//i;
 
 let ws = null;
 let reconnectTimer = null;
+let keepaliveTimer = null;
 
 // sessionId → tabId mapping (managed by session_init/session_close)
 const sessionTabs = new Map();
@@ -23,6 +27,34 @@ const sessionGroups = new Map();
 
 const GROUP_COLORS = ['blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'];
 let colorIndex = 0;
+
+async function ensureOffscreen() {
+  if (!chrome.offscreen?.createDocument) return;
+
+  try {
+    if (chrome.offscreen.hasDocument && await chrome.offscreen.hasDocument()) return;
+    await chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: ['BLOBS'],
+      justification: 'Keep the Pilot MCP WebSocket connection alive during active browser automation.',
+    });
+  } catch (err) {
+    if (!String(err?.message || err).includes('Only a single offscreen document')) {
+      console.warn('[pilot] Could not create offscreen keepalive document:', err);
+    }
+  }
+}
+
+function startReconnectAlarm() {
+  if (!chrome.alarms?.create) return;
+  chrome.alarms.create(RECONNECT_ALARM, { periodInMinutes: 1 });
+}
+
+function sendKeepalive() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'keepalive', role: 'extension', ts: Date.now() }));
+  }
+}
 
 function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
@@ -33,6 +65,7 @@ function connect() {
     console.log('[pilot] Connected to broker');
     clearTimeout(reconnectTimer);
     updateBadge(true);
+    startKeepalive();
     // Identify as extension
     ws.send(JSON.stringify({ type: 'hello', role: 'extension' }));
   };
@@ -40,6 +73,7 @@ function connect() {
   ws.onclose = () => {
     console.log('[pilot] Disconnected from broker, reconnecting...');
     ws = null;
+    stopKeepalive();
     updateBadge(false);
     reconnectTimer = setTimeout(connect, RECONNECT_DELAY);
   };
@@ -69,6 +103,20 @@ function connect() {
   };
 }
 
+function startKeepalive() {
+  stopKeepalive();
+  keepaliveTimer = setInterval(() => {
+    sendKeepalive();
+  }, KEEPALIVE_INTERVAL);
+}
+
+function stopKeepalive() {
+  if (keepaliveTimer) {
+    clearInterval(keepaliveTimer);
+    keepaliveTimer = null;
+  }
+}
+
 function updateBadge(connected) {
   chrome.action.setBadgeText({ text: connected ? 'ON' : '' });
   chrome.action.setBadgeBackgroundColor({ color: connected ? '#22c55e' : '#ef4444' });
@@ -96,19 +144,19 @@ async function handleCommand(type, payload, sessionId, tabId) {
 
     // ── Navigation (uses session's tab) ──
     case 'navigate':
-      return await navigate(payload.url, tabId);
+      return await navigate(payload.url, tabId, sessionId);
     case 'back':
-      return await goBack(tabId);
+      return await goBack(tabId, sessionId);
     case 'forward':
-      return await goForward(tabId);
+      return await goForward(tabId, sessionId);
     case 'reload':
-      return await doReload(tabId);
+      return await doReload(tabId, sessionId);
     case 'get_url':
-      return await getUrl(tabId);
+      return await getUrl(tabId, sessionId);
 
     // ── Screenshot ──
     case 'screenshot':
-      return await screenshot(tabId);
+      return await screenshot(tabId, sessionId);
 
     // ── Content Script Commands ──
     case 'snapshot':
@@ -119,15 +167,20 @@ async function handleCommand(type, payload, sessionId, tabId) {
     case 'scroll':
     case 'hover':
     case 'select_option':
+    case 'upload_file':
     case 'wait':
     case 'find':
     case 'page_links':
     case 'page_forms':
     case 'element_state':
+    case 'dom_find':
     case 'evaluate':
     case 'page_text':
     case 'page_html':
-      return await relayToContent(type, payload, tabId);
+      return await relayToContent(type, payload, tabId, sessionId);
+
+    case 'click_text':
+      return await trustedClickText(payload, tabId, sessionId);
 
     case 'ping':
       return { pong: true };
@@ -142,13 +195,8 @@ async function handleCommand(type, payload, sessionId, tabId) {
 async function initSession(sessionId) {
   // Check if we already have a tab for this session
   if (sessionTabs.has(sessionId)) {
-    const existing = sessionTabs.get(sessionId);
-    try {
-      await chrome.tabs.get(existing);
-      return { tabId: existing };
-    } catch {
-      // Tab was closed, create a new one
-    }
+    const existing = await getUsableTab(sessionTabs.get(sessionId));
+    if (existing) return { tabId: existing.id };
   }
 
   const tab = await chrome.tabs.create({ url: 'about:blank', active: false });
@@ -187,8 +235,47 @@ async function closeSession(sessionId, tabId) {
 
 // ─── Tab Helpers ───────────────────────────────────────────
 
-function resolveTab(tabId) {
-  if (tabId) return tabId;
+function isInternalUrl(url) {
+  return INTERNAL_URL_RE.test(url || '');
+}
+
+async function getUsableTab(tabId) {
+  if (!tabId) return null;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (!tab?.id || isInternalUrl(tab.url)) return null;
+    return tab;
+  } catch {
+    return null;
+  }
+}
+
+async function getActiveContentTab() {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tabs.find(t => t?.id && !isInternalUrl(t.url)) || null;
+}
+
+async function resolveTab(tabId, sessionId) {
+  const candidates = [tabId, sessionId ? sessionTabs.get(sessionId) : undefined];
+  for (const candidate of candidates) {
+    const tab = await getUsableTab(candidate);
+    if (tab?.id) {
+      if (sessionId) sessionTabs.set(sessionId, tab.id);
+      return tab.id;
+    }
+  }
+
+  const active = await getActiveContentTab();
+  if (active?.id) {
+    if (sessionId) sessionTabs.set(sessionId, active.id);
+    return active.id;
+  }
+
+  if (sessionId) {
+    const created = await initSession(sessionId);
+    return created.tabId;
+  }
+
   throw new Error('No tab assigned to this session — call session_init first');
 }
 
@@ -226,49 +313,51 @@ async function closeTab(tabId) {
 }
 
 async function switchTab(tabId, sessionId) {
+  const tab = await getUsableTab(tabId);
+  if (!tab?.id) throw new Error(`No such tab: ${tabId}`);
   await chrome.tabs.update(tabId, { active: true });
   if (sessionId) sessionTabs.set(sessionId, tabId);
-  return {};
+  return { tabId };
 }
 
 // ─── Navigation ────────────────────────────────────────────
 
-async function navigate(url, tabId) {
-  const id = resolveTab(tabId);
+async function navigate(url, tabId, sessionId) {
+  const id = await resolveTab(tabId, sessionId);
   await chrome.tabs.update(id, { url });
   await waitForTabLoad(id);
   const updated = await chrome.tabs.get(id);
-  return { url: updated.url };
+  return { url: updated.url, tabId: id };
 }
 
-async function goBack(tabId) {
-  const id = resolveTab(tabId);
+async function goBack(tabId, sessionId) {
+  const id = await resolveTab(tabId, sessionId);
   await chrome.tabs.goBack(id);
   await waitForTabLoad(id);
   const updated = await chrome.tabs.get(id);
-  return { url: updated.url };
+  return { url: updated.url, tabId: id };
 }
 
-async function goForward(tabId) {
-  const id = resolveTab(tabId);
+async function goForward(tabId, sessionId) {
+  const id = await resolveTab(tabId, sessionId);
   await chrome.tabs.goForward(id);
   await waitForTabLoad(id);
   const updated = await chrome.tabs.get(id);
-  return { url: updated.url };
+  return { url: updated.url, tabId: id };
 }
 
-async function doReload(tabId) {
-  const id = resolveTab(tabId);
+async function doReload(tabId, sessionId) {
+  const id = await resolveTab(tabId, sessionId);
   await chrome.tabs.reload(id);
   await waitForTabLoad(id);
   const updated = await chrome.tabs.get(id);
-  return { url: updated.url };
+  return { url: updated.url, tabId: id };
 }
 
-async function getUrl(tabId) {
-  const id = resolveTab(tabId);
+async function getUrl(tabId, sessionId) {
+  const id = await resolveTab(tabId, sessionId);
   const tab = await chrome.tabs.get(id);
-  return { url: tab.url };
+  return { url: tab.url, tabId: id };
 }
 
 function waitForTabLoad(tabId, timeout = 15000) {
@@ -291,9 +380,9 @@ function waitForTabLoad(tabId, timeout = 15000) {
 
 // ─── Screenshot ────────────────────────────────────────────
 
-async function screenshot(tabId) {
+async function screenshot(tabId, sessionId) {
   // Focus the tab briefly to capture
-  const id = resolveTab(tabId);
+  const id = await resolveTab(tabId, sessionId);
   await chrome.tabs.update(id, { active: true });
   await new Promise(r => setTimeout(r, 100));
   const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
@@ -303,8 +392,8 @@ async function screenshot(tabId) {
 
 // ─── Content Script Relay ──────────────────────────────────
 
-async function relayToContent(type, payload, tabId) {
-  const id = resolveTab(tabId);
+async function relayToContent(type, payload, tabId, sessionId) {
+  const id = await resolveTab(tabId, sessionId);
 
   // Ensure content script is injected
   try {
@@ -318,12 +407,62 @@ async function relayToContent(type, payload, tabId) {
 
   const results = await chrome.tabs.sendMessage(id, { type, payload });
   if (results?.error) throw new Error(results.error);
-  return results?.result ?? results;
+  const result = results?.result ?? results;
+  return result && typeof result === 'object' && !Array.isArray(result)
+    ? { ...result, tabId: id }
+    : result;
+}
+
+async function trustedClickText(payload, tabId, sessionId) {
+  const id = await resolveTab(tabId, sessionId);
+  const target = await relayToContent('find_text_rect', payload, id, sessionId);
+  await dispatchTrustedClick(id, target.x, target.y);
+  return { ...target, trusted: true, tabId: id };
+}
+
+async function dispatchTrustedClick(tabId, x, y) {
+  if (!chrome.debugger?.attach) {
+    throw new Error('Trusted click requires the Chrome debugger permission');
+  }
+
+  const target = { tabId };
+  try {
+    await chrome.debugger.attach(target, '1.3');
+    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', {
+      type: 'mouseMoved',
+      x,
+      y,
+      button: 'none',
+    });
+    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', {
+      type: 'mousePressed',
+      x,
+      y,
+      button: 'left',
+      clickCount: 1,
+    });
+    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', {
+      type: 'mouseReleased',
+      x,
+      y,
+      button: 'left',
+      clickCount: 1,
+    });
+  } finally {
+    try { await chrome.debugger.detach(target); } catch {}
+  }
 }
 
 // ─── Internal Messages (from popup) ───────────────────────
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.type === 'offscreen_keepalive') {
+    connect();
+    sendKeepalive();
+    sendResponse({ ok: true, connected: ws && ws.readyState === WebSocket.OPEN });
+    return false;
+  }
+
   if (msg.type === 'ping') {
     sendResponse({
       pong: ws && ws.readyState === WebSocket.OPEN,
@@ -333,8 +472,51 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return false;
 });
 
+// Keep session routing in sync when the user manually changes Chrome tabs.
+if (chrome.tabs.onActivated) {
+  chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+    const tab = await getUsableTab(tabId);
+    if (!tab?.id) return;
+    for (const [sessionId, groupId] of sessionGroups) {
+      if (tab.groupId === groupId) {
+        sessionTabs.set(sessionId, tab.id);
+        return;
+      }
+    }
+  });
+}
+
+if (chrome.tabs.onRemoved) {
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    for (const [sessionId, mappedTabId] of sessionTabs) {
+      if (mappedTabId === tabId) sessionTabs.delete(sessionId);
+    }
+  });
+}
+
 // ─── Startup ───────────────────────────────────────────────
 
+ensureOffscreen();
+startReconnectAlarm();
 connect();
-chrome.runtime.onStartup.addListener(connect);
-chrome.runtime.onInstalled.addListener(connect);
+
+chrome.runtime.onStartup.addListener(() => {
+  ensureOffscreen();
+  startReconnectAlarm();
+  connect();
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  ensureOffscreen();
+  startReconnectAlarm();
+  connect();
+});
+
+if (chrome.alarms?.onAlarm) {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name !== RECONNECT_ALARM) return;
+    ensureOffscreen();
+    connect();
+    sendKeepalive();
+  });
+}

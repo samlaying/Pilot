@@ -27,6 +27,31 @@ function wrapForEvaluate(code: string): string {
 
 const MAX_EXPRESSION_LENGTH = 50 * 1024;
 
+function formatDomMatches(result: { matches?: any[]; count?: number }): string {
+  const matches = result.matches || [];
+  if (matches.length === 0) return '(no DOM matches)';
+  return matches.map((match, index) => {
+    const rect = match.rect
+      ? ` rect=${match.rect.x},${match.rect.y},${match.rect.width}x${match.rect.height}`
+      : '';
+    const attrs = [
+      match.role ? `role=${match.role}` : null,
+      match.id ? `id=${match.id}` : null,
+      match.ariaLabel ? `aria-label="${match.ariaLabel}"` : null,
+      match.ariaSelected ? `aria-selected=${match.ariaSelected}` : null,
+      match.ariaExpanded ? `aria-expanded=${match.ariaExpanded}` : null,
+      match.className ? `class="${match.className}"` : null,
+    ].filter(Boolean).join(' ');
+    return [
+      `${index + 1}. ${match.tag}${rect}${attrs ? ` ${attrs}` : ''}`,
+      `   selector: ${match.selector}`,
+      match.clickSelector ? `   clickSelector: ${match.clickSelector}` : '',
+      match.clickTag ? `   clickTarget: ${match.clickTag}${match.clickRole ? ` role=${match.clickRole}` : ''}${match.clickClassName ? ` class="${match.clickClassName}"` : ''}` : '',
+      `   text: ${match.text || ''}`,
+    ].filter(Boolean).join('\n');
+  }).join('\n');
+}
+
 export function registerInspectionTools(server: McpServer, bm: BrowserManager) {
   server.tool(
     'pilot_console',
@@ -130,6 +155,160 @@ Errors:
         const result = await bm.getPage().evaluate(wrapped);
         const text = typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result ?? '');
         return { content: [{ type: 'text' as const, text }] };
+      } catch (err) {
+        return { content: [{ type: 'text' as const, text: wrapError(err) }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    'pilot_dom_find',
+    `Find DOM elements by visible text or selector, including portal, overlay, and shadow DOM content that may not appear in the accessibility snapshot.
+Use when the user wants to inspect a custom dropdown, autocomplete list, modal, or overlay after opening it, especially when pilot_snapshot cannot see the rendered options.
+
+Parameters:
+- text: Optional visible text to search for, such as "北京市" or "北京"
+- selector: Optional CSS selector to limit the search area
+- exact: Set to true to require exact normalized text equality; default is substring matching
+- visible_only: Set to false to include hidden elements; default is true
+- limit: Maximum number of matches to return, default 20
+
+Returns: Ranked DOM matches with tag, role, selector, text, visibility, classes, ARIA state, and bounding rectangle.
+
+Errors:
+- "Selector not found": The provided selector did not match any element.
+- "No active page": Navigate to a page first.`,
+      {
+      text: z.string().optional().describe('Visible text to search for'),
+      selector: z.string().optional().describe('Optional CSS selector search scope'),
+      exact: z.boolean().optional().describe('Require exact normalized text match'),
+      visible_only: z.boolean().optional().describe('Only include visible elements (default true)'),
+      limit: z.number().optional().describe('Maximum matches to return (default 20)'),
+    },
+    async ({ text, selector, exact, visible_only, limit }) => {
+      await bm.ensureBrowser();
+      try {
+        const payload = {
+          text,
+          selector,
+          exact: exact === true,
+          visibleOnly: visible_only !== false,
+          limit: limit || 20,
+        };
+        const ext = bm.getExtension();
+        if (ext) {
+          const result = await bm.extSend<{ matches: any[]; count: number }>('dom_find', payload);
+          return { content: [{ type: 'text' as const, text: formatDomMatches(result) }] };
+        }
+
+        const result = await bm.getPage().evaluate((args) => {
+          const normalizeText = (value: unknown) => String(value || '').replace(/\s+/g, ' ').trim();
+          const isVisible = (el: Element) => {
+            const rect = el.getBoundingClientRect();
+            const style = getComputedStyle(el);
+            return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+          };
+          const cssPath = (el: Element): string => {
+            if ((el as HTMLElement).id) return `#${CSS.escape((el as HTMLElement).id)}`;
+            const parts: string[] = [];
+            let current: Element | null = el;
+            while (current && current !== document.body) {
+              let part = current.tagName.toLowerCase();
+              const className = (current as HTMLElement).className;
+              const classes = typeof className === 'string'
+                ? className.trim().split(/\s+/).filter(Boolean).slice(0, 3)
+                : [];
+              if (classes.length) part += classes.map(cls => `.${CSS.escape(cls)}`).join('');
+              const parent: Element | null = current.parentElement;
+              if (parent) {
+                const siblings = Array.from(parent.children).filter((child): child is Element => child.tagName === current!.tagName);
+                if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+              }
+              parts.unshift(part);
+              current = parent;
+            }
+            return parts.join(' > ');
+          };
+          const scoreClick = (el: Element) => {
+            let score = 0;
+            const role = el.getAttribute('role');
+            const className = typeof (el as HTMLElement).className === 'string' ? (el as HTMLElement).className.toLowerCase() : '';
+            if (role === 'option') score += 50;
+            if (role === 'menuitem' || role === 'listitem') score += 30;
+            if (role === 'button') score += 10;
+            if (['LI', 'BUTTON', 'A'].includes(el.tagName)) score += 20;
+            if (el.hasAttribute('data-value') || el.hasAttribute('data-key')) score += 35;
+            if (el.hasAttribute('aria-selected')) score += 30;
+            if (/\b(option|item|select|dropdown|drop-down|list|result|choice)\b/i.test(className)) score += 35;
+            if (/\b(menu|content)\b/i.test(className)) score += 8;
+            if (/\b(label|text)\b/i.test(className)) score += 4;
+            if (/\b(header|container|wrapper|arrow|icon|placeholder|input)\b/i.test(className)) score -= 25;
+            score -= Math.min(25, el.children.length * 2);
+            return score;
+          };
+          const clickableAncestor = (el: Element): Element => {
+            const candidates: Element[] = [];
+            let current: Element | null = el;
+            while (current && current !== document.body) {
+              candidates.push(current);
+              current = current.parentElement;
+            }
+            return candidates
+              .filter(isVisible)
+              .map(candidate => ({ candidate, score: scoreClick(candidate) }))
+              .filter(item => item.score > 0)
+              .sort((a, b) => b.score - a.score)[0]?.candidate || el;
+          };
+          const collect = (root: ParentNode): Element[] => {
+            const out: Element[] = [];
+            const visit = (node: ParentNode) => {
+              for (const child of Array.from(node.children || [])) {
+                out.push(child);
+                const shadowRoot = (child as HTMLElement).shadowRoot;
+                if (shadowRoot) visit(shadowRoot);
+                visit(child);
+              }
+            };
+            visit(root);
+            return out;
+          };
+          const root = args.selector ? document.querySelector(args.selector) : document;
+          if (!root) throw new Error(`Selector not found: ${args.selector}`);
+          const targetText = normalizeText(args.text);
+          const matches = collect(root)
+            .filter(el => !args.visibleOnly || isVisible(el))
+            .filter(el => {
+              if (!args.text) return true;
+              const candidateText = normalizeText((el as HTMLElement).innerText || el.textContent || '');
+              return args.exact ? candidateText === targetText : candidateText.includes(targetText);
+            })
+            .slice(0, Math.max(1, Math.min(args.limit || 20, 100)))
+            .map(el => {
+              const rect = el.getBoundingClientRect();
+              const clickTarget = clickableAncestor(el);
+              const clickRect = clickTarget.getBoundingClientRect();
+              return {
+                selector: cssPath(el),
+                clickSelector: cssPath(clickTarget),
+                clickTag: clickTarget.tagName.toLowerCase(),
+                clickRole: clickTarget.getAttribute('role'),
+                clickClassName: typeof (clickTarget as HTMLElement).className === 'string' ? (clickTarget as HTMLElement).className.slice(0, 200) : '',
+                tag: el.tagName.toLowerCase(),
+                role: el.getAttribute('role'),
+                text: normalizeText((el as HTMLElement).innerText || el.textContent || '').slice(0, 200),
+                ariaLabel: el.getAttribute('aria-label'),
+                ariaSelected: el.getAttribute('aria-selected'),
+                ariaExpanded: el.getAttribute('aria-expanded'),
+                className: typeof (el as HTMLElement).className === 'string' ? (el as HTMLElement).className.slice(0, 200) : '',
+                id: (el as HTMLElement).id || null,
+                visible: isVisible(el),
+                rect: { x: Math.round(rect.left), y: Math.round(rect.top), width: Math.round(rect.width), height: Math.round(rect.height) },
+                clickRect: { x: Math.round(clickRect.left), y: Math.round(clickRect.top), width: Math.round(clickRect.width), height: Math.round(clickRect.height) },
+              };
+            });
+          return { matches, count: matches.length };
+        }, payload);
+        return { content: [{ type: 'text' as const, text: formatDomMatches(result) }] };
       } catch (err) {
         return { content: [{ type: 'text' as const, text: wrapError(err) }], isError: true };
       }

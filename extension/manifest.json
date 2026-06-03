@@ -3,13 +3,17 @@
   "name": "Pilot MCP",
   "version": "0.1.0",
   "description": "Connect Claude Code to your real Chrome browser via Pilot MCP",
+  "minimum_chrome_version": "116",
   "permissions": [
     "tabs",
     "activeTab",
     "scripting",
     "webNavigation",
     "cookies",
-    "storage"
+    "storage",
+    "offscreen",
+    "alarms",
+    "debugger"
   ],
   "optional_permissions": [
     "tabGroups"

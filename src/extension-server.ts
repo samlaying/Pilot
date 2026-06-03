@@ -149,6 +149,7 @@ export class ExtensionServer {
       }
 
       if (role === 'extension') {
+        if (msg.type === 'keepalive') return;
         // Response from extension — route to the right MCP client (or self)
         this._handleExtensionResponse(msg);
       } else if (role === 'mcp' && clientSessionId) {
@@ -222,6 +223,28 @@ export class ExtensionServer {
   private _startHeartbeat(): void {
     if (this.heartbeatTimer) return;
     this.heartbeatTimer = setInterval(() => {
+      if (this.extensionSocket) {
+        if (this.extensionSocket.readyState !== WebSocket.OPEN) {
+          console.error('[pilot] Heartbeat: extension socket is not open — dropping stale connection');
+          this.extensionSocket = null;
+          this.sessionTabs.clear();
+          this._checkState();
+        } else {
+          const socket = this.extensionSocket;
+          socket.ping();
+          const pongTimer = setTimeout(() => {
+            if (this.extensionSocket === socket && socket.readyState === WebSocket.OPEN) {
+              console.error('[pilot] Heartbeat: extension unresponsive — terminating');
+              socket.terminate();
+              this.extensionSocket = null;
+              this.sessionTabs.clear();
+              this._checkState();
+            }
+          }, HEARTBEAT_TIMEOUT);
+          socket.once('pong', () => clearTimeout(pongTimer));
+        }
+      }
+
       for (const [sid, ws] of this.mcpClients) {
         if (ws.readyState !== WebSocket.OPEN) {
           console.error(`[pilot] Heartbeat: pruned dead session ${sid.slice(0, 8)}`);
@@ -256,7 +279,7 @@ export class ExtensionServer {
       }
       return;
     }
-    const tabId = this.sessionTabs.get(sessionId);
+    const tabId = msg.tabId ?? this.sessionTabs.get(sessionId);
     this.extensionSocket.send(JSON.stringify({
       ...msg, sessionId, tabId,
     }));
@@ -265,6 +288,9 @@ export class ExtensionServer {
   /** Route extension response to the right MCP client or resolve local pending */
   private _handleExtensionResponse(msg: any): void {
     const sessionId = msg.sessionId;
+    if (sessionId && msg.result?.tabId) {
+      this.sessionTabs.set(sessionId, msg.result.tabId);
+    }
 
     // If it's for this broker's own session
     if (sessionId === this.sessionId || !sessionId) {
@@ -313,6 +339,9 @@ export class ExtensionServer {
       if (!pending) return;
       clearTimeout(pending.timer);
       this.pending.delete(msg.id);
+      if (msg.result?.tabId) {
+        this.sessionTabs.set(this.sessionId, msg.result.tabId);
+      }
       if (msg.error) pending.reject(new Error(msg.error));
       else pending.resolve(msg.result);
     });
@@ -382,7 +411,7 @@ export class ExtensionServer {
         timer,
       });
 
-      const cmd = { id, type, payload, sessionId: this.sessionId };
+      const cmd = { id, type, payload, sessionId: this.sessionId, tabId: overrideTabId };
 
       try {
         if (this.mode === 'broker') {

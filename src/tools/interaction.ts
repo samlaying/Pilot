@@ -6,6 +6,23 @@ import { wrapError } from '../errors.js';
 import * as fs from 'fs';
 import * as path from 'path';
 
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+
+function mimeTypeForFile(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  const types: Record<string, string> = {
+    '.pdf': 'application/pdf',
+    '.doc': 'application/msword',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.txt': 'text/plain',
+    '.csv': 'text/csv',
+  };
+  return types[ext] || 'application/octet-stream';
+}
+
 /** After an action, take a lightweight snapshot so the LLM doesn't need a separate call */
 async function postActionSnapshot(bm: BrowserManager): Promise<string> {
   try {
@@ -200,7 +217,7 @@ Errors:
       try {
         const ext = bm.getExtension();
         if (ext) {
-          const res = await ext.send<{ selected: string; value: string }>('select_option', { ref, label: value });
+          const res = await bm.extSend<{ selected: string; value: string }>('select_option', { ref, label: value });
           bm.resetFailures();
           return { content: [{ type: 'text' as const, text: `Selected "${res.selected}" in ${ref}` }] };
         }
@@ -253,6 +270,49 @@ Errors:
         if (submit) await page.keyboard.press('Enter');
         bm.resetFailures();
         return { content: [{ type: 'text' as const, text: `Typed ${text.length} characters${submit ? ' + Enter' : ''}` }] };
+      } catch (err) {
+        bm.incrementFailures();
+        return { content: [{ type: 'text' as const, text: wrapError(err) }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    'pilot_click_text',
+    `Click a visible text match by promoting it to the nearest semantic clickable ancestor, including elements rendered in portal or overlay containers.
+Use when the user wants to choose an item from a custom dropdown, menu, autocomplete result, or overlay that does not appear in pilot_snapshot but is visible in the page DOM.
+
+Parameters:
+- text: Visible text to click (e.g., "北京市")
+- exact: Match the full normalized text exactly (default: true). Set false for substring matching.
+- selector: Optional CSS selector limiting the search area.
+
+Returns: Confirmation with the clicked text and a lightweight page state when available. For custom dropdowns, use pilot_dom_find first when multiple matching labels exist.
+
+Errors:
+- "Visible text not found": No visible DOM element matched the text. Open the dropdown first, or set exact=false.
+- "Selector not found": The provided selector did not match any element.`,
+      {
+      text: z.string().describe('Visible text to click'),
+      exact: z.boolean().optional().describe('Require exact text match (default: true)'),
+      selector: z.string().optional().describe('Optional CSS selector search scope'),
+    },
+    async ({ text, exact, selector }) => {
+      await bm.ensureBrowser();
+      try {
+        const ext = bm.getExtension();
+        if (ext) {
+          await bm.extSend('click_text', { text, exact: exact !== false, selector });
+          bm.resetFailures();
+          return { content: [{ type: 'text' as const, text: `Clicked visible text "${text}"` }] };
+        }
+        const locator = selector
+          ? bm.getPage().locator(selector).getByText(text, { exact: exact !== false })
+          : bm.getPage().getByText(text, { exact: exact !== false });
+        await locator.first().click({ timeout: 5000 });
+        bm.resetFailures();
+        const snap = await postActionSnapshot(bm);
+        return { content: [{ type: 'text' as const, text: `Clicked visible text "${text}"${snap}` }] };
       } catch (err) {
         bm.incrementFailures();
         return { content: [{ type: 'text' as const, text: wrapError(err) }], isError: true };
@@ -450,11 +510,11 @@ Errors:
 
   server.tool(
     'pilot_file_upload',
-    `Upload one or more files to a file input element on the page.
-Use when the user wants to attach files, upload images, or submit documents through a file input field.
+    `Upload one or more local files to a file input element on the page without opening the system file picker.
+Use when the user wants to attach files, upload images, submit documents, or fill a hidden <input type="file"> behind a custom upload button.
 
 Parameters:
-- ref: The file input element reference from snapshot (e.g., "@e8") or a CSS selector pointing to an <input type="file">
+- ref: Optional file input element reference from snapshot (e.g., "@e8") or a CSS selector pointing to an <input type="file">. Omit to use the best matching file input on the page.
 - paths: Array of absolute file paths to upload (e.g., ["/home/user/photo.png", "/home/user/doc.pdf"])
 
 Returns: Confirmation with file names and sizes uploaded.
@@ -464,7 +524,7 @@ Errors:
 - "Element not found": The ref is stale or does not point to a file input. Run pilot_snapshot.
 - "Not a file input": The element is not an <input type="file">.`,
       {
-      ref: z.string().describe('File input element ref or CSS selector'),
+      ref: z.string().optional().describe('Optional file input element ref or CSS selector'),
       paths: z.array(z.string()).describe('File paths to upload'),
     },
     async ({ ref, paths }) => {
@@ -474,13 +534,37 @@ Errors:
           if (!fs.existsSync(fp)) throw new Error(`File not found: ${fp}`);
           return fs.realpathSync(fp);
         });
-        const page = bm.getPage();
-        const resolved = await bm.resolveRef(ref);
-        if ('locator' in resolved) {
-          await resolved.locator.setInputFiles(resolvedPaths);
+
+        const ext = bm.getExtension();
+        if (ext) {
+          const files = resolvedPaths.map(fp => {
+            const stat = fs.statSync(fp);
+            if (stat.size > MAX_UPLOAD_BYTES) {
+              throw new Error(`File too large for extension upload (${stat.size}B > ${MAX_UPLOAD_BYTES}B): ${fp}`);
+            }
+            return {
+              name: path.basename(fp),
+              size: stat.size,
+              mimeType: mimeTypeForFile(fp),
+              lastModified: stat.mtimeMs,
+              data: fs.readFileSync(fp).toString('base64'),
+            };
+          });
+          await bm.extSend('upload_file', {
+            ...(ref ? (ref.startsWith('@') ? { ref } : { selector: ref }) : {}),
+            files,
+          });
         } else {
-          await page.locator(resolved.selector).setInputFiles(resolvedPaths);
+          const page = bm.getPage();
+          const target = ref || 'input[type="file"]';
+          const resolved = await bm.resolveRef(target);
+          if ('locator' in resolved) {
+            await resolved.locator.setInputFiles(resolvedPaths);
+          } else {
+            await page.locator(resolved.selector).setInputFiles(resolvedPaths);
+          }
         }
+
         const fileInfo = resolvedPaths.map(fp => {
           const stat = fs.statSync(fp);
           return `${path.basename(fp)} (${stat.size}B)`;
