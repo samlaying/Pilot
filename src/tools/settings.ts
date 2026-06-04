@@ -265,7 +265,7 @@ Errors: None — this status check is read-only and always returns connection de
         if (mode === 'broker' && clients > 0) status += ` | Other sessions: ${clients}`;
         return { content: [{ type: 'text' as const, text: status }] };
       }
-      return { content: [{ type: 'text' as const, text: `Extension not connected (mode: ${mode}, session: ${session}).\n\nTo use the Pilot extension:\n1. Open Chrome → chrome://extensions → Enable Developer Mode\n2. Load unpacked → select the "extension/" folder in the Pilot repo\n3. The extension auto-connects to ws://127.0.0.1:3131` }] };
+      return { content: [{ type: 'text' as const, text: `Extension not connected (mode: ${mode}, session: ${session}).\n\nTo use the Pilot extension:\n1. Open Chrome → chrome://extensions → Enable Developer Mode\n2. Load unpacked → select the "extension/dist/" folder in the Pilot repo\n3. The extension auto-connects to ws://127.0.0.1:3131` }] };
     }
   );
 

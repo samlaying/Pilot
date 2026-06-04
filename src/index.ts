@@ -26,9 +26,10 @@ import { fileURLToPath } from 'url';
 // ─── CLI: --install-extension ────────────────────────────────
 if (process.argv.includes('--install-extension')) {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
-  const extDir = path.resolve(__dirname, '..', 'extension');
+  const extDir = path.resolve(__dirname, '..', 'extension', 'dist');
   if (!fs.existsSync(extDir)) {
     console.error(`Extension folder not found at ${extDir}`);
+    console.error(`Run "npm run build:extension" first, or reinstall the package so the bundled extension is available.`);
     process.exit(1);
   }
   console.log(`\nPilot Chrome Extension`);
