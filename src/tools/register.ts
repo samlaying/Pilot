@@ -46,7 +46,7 @@ const STANDARD_TOOLS = new Set([
   // inspection
   'pilot_dom_find',
   // visual
-  'pilot_annotated_screenshot',
+  'pilot_annotated_screenshot', 'pilot_vision',
   // iframe
   'pilot_frames', 'pilot_frame_select', 'pilot_frame_reset',
   // session + config

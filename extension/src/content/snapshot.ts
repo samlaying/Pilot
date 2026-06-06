@@ -5,6 +5,7 @@
  * subsequent commands (click, fill, etc.) can locate them by @eN ref.
  */
 
+import { rememberElement } from './adaptive-locator';
 import { truncate } from './utils';
 
 /** Current ref counter value (read-only from outside; use incrementRefCounter to change). */
@@ -92,6 +93,7 @@ export function snapshot(opts: SnapshotOptions = {}): SnapshotResult {
       refCounter++;
       const refId = `e${refCounter}`;
       el.setAttribute('data-pilot-ref', refId);
+      rememberElement(`@${refId}`, el);
       ref = ` [@${refId}]`;
       count++;
     }

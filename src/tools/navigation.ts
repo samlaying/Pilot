@@ -169,6 +169,17 @@ Errors:
       await bm.ensureBrowser();
       try {
         await validateNavigationUrl(url);
+        const ext = bm.getExtension();
+        if (ext) {
+          const navigated = await bm.extSend<{ url: string }>('navigate', { url });
+          const [updatedText, updatedInteractive] = await Promise.all([
+            bm.extSend<{ text: string; url: string; title: string }>('page_text'),
+            bm.extSend<{ text: string }>('snapshot', { maxElements: 50 }),
+          ]);
+          bm.resetFailures();
+          const text = `${updatedText.url || navigated.url}\n\n--- content ---\n${updatedText.text}\n\n--- interactive ---\n${updatedInteractive.text}`;
+          return { content: [{ type: 'text' as const, text }] };
+        }
         const page = bm.getPage();
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
         bm.resetFailures();

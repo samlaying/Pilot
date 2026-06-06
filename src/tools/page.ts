@@ -27,6 +27,11 @@ function truncate(text: string, maxChars?: number): string {
   return truncated + `\n\n── truncated: ${remaining} chars not shown (use max_chars to increase) ──`;
 }
 
+function refToExtensionSelector(ref: string): string {
+  const match = ref.match(/^@?([ec]\d+)$/);
+  return match ? `[data-pilot-ref="${match[1]}"]` : ref;
+}
+
 export function registerPageTools(server: McpServer, bm: BrowserManager) {
   server.tool(
     'pilot_page_text',
@@ -37,6 +42,11 @@ export function registerPageTools(server: McpServer, bm: BrowserManager) {
     async ({ max_chars }) => {
       await bm.ensureBrowser();
       try {
+        const ext = bm.getExtension();
+        if (ext) {
+          const res = await bm.extSend<{ text: string; url: string; title: string }>('page_text');
+          return { content: [{ type: 'text' as const, text: truncate(res.text, max_chars) }] };
+        }
         const text = await getCleanText(bm.getPage());
         return { content: [{ type: 'text' as const, text: truncate(text, max_chars) }] };
       } catch (err) {
@@ -55,6 +65,14 @@ export function registerPageTools(server: McpServer, bm: BrowserManager) {
     async ({ ref, max_chars }) => {
       await bm.ensureBrowser();
       try {
+        const ext = bm.getExtension();
+        if (ext) {
+          const res = await bm.extSend<{ html: string }>('page_html', {
+            selector: ref ? refToExtensionSelector(ref) : undefined,
+            maxChars: max_chars ?? DEFAULT_MAX_CHARS,
+          });
+          return { content: [{ type: 'text' as const, text: truncate(res.html, max_chars) }] };
+        }
         const page = bm.getPage();
         if (ref) {
           const resolved = await bm.resolveRef(ref);

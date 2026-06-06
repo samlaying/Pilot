@@ -3,12 +3,54 @@ import { z } from 'zod';
 import type { BrowserManager } from '../browser-manager.js';
 import { wrapError } from '../errors.js';
 import { validateNavigationUrl } from '../url-validation.js';
+import { execFile } from 'child_process';
 import * as Diff from 'diff';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { promisify } from 'util';
 
 const TEMP_DIR = process.platform === 'win32' ? os.tmpdir() : '/tmp';
+const DEFAULT_VISION_DIR = path.join(os.homedir(), '04-jianli', 'pilot_screenshot');
+const execFileAsync = promisify(execFile);
+
+function slugifyFilePart(value: string, fallback: string): string {
+  const slug = value
+    .trim()
+    .replace(/[\\/:*?"<>|]+/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  return slug || fallback;
+}
+
+function getLocalDateStamp(): string {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
+function buildVisionScreenshotPath(company: string, position: string, outputDir?: string): string {
+  const dir = path.resolve(outputDir || process.env.PILOT_VISION_DIR || DEFAULT_VISION_DIR);
+  fs.mkdirSync(dir, { recursive: true });
+
+  const date = getLocalDateStamp();
+  const baseName = [
+    date,
+    slugifyFilePart(company, 'company'),
+    slugifyFilePart(position, 'position'),
+  ].join('-');
+  let candidate = path.join(dir, `${baseName}.png`);
+  let suffix = 2;
+
+  while (fs.existsSync(candidate)) {
+    candidate = path.join(dir, `${baseName}-${suffix}.png`);
+    suffix += 1;
+  }
+
+  return candidate;
+}
 
 function resolveExistingPathPrefix(targetPath: string): string {
   const absolute = path.resolve(targetPath);
@@ -136,6 +178,85 @@ Errors:
         };
       } catch (err) {
         return { content: [{ type: 'text' as const, text: wrapError(err) }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    'pilot_vision',
+    `Capture the current page as a PNG named by date, company, and position, then ask Kimi CLI to analyze the saved image.
+Use when DOM, snapshot, accessibility tree, or class names are not enough to verify the visual page state, such as selected filters, checked boxes, visible job listings, or custom-rendered UI.
+
+Parameters:
+- prompt: The visual question to ask Kimi about the screenshot
+- company: Company name to include in the screenshot filename, e.g. "kuaishou" or "字节跳动"
+- position: Position or job name to include in the screenshot filename, e.g. "运营" or "后端开发"
+- output_dir: Directory for screenshots (default: ~/04-jianli/pilot_screenshot)
+- ref: Element reference from snapshot (e.g., "@e3") or CSS selector to screenshot a specific element (omit for full page)
+- full_page: Set to false for viewport-only capture (default: true)
+- clip: Crop region as {x, y, width, height} pixel coordinates for a specific area of the page
+
+Returns: Kimi's analysis, plus the local screenshot path that was analyzed.
+
+Errors:
+- "Kimi CLI failed": The kimi command is not installed, not on PATH, or returned a non-zero exit code.
+- "Element not found": The ref is stale. Run pilot_snapshot to get fresh refs.`,
+    {
+      prompt: z.string().describe('Question or instruction for Kimi to answer from the screenshot'),
+      company: z.string().describe('Company name used in the screenshot filename'),
+      position: z.string().describe('Position or job name used in the screenshot filename'),
+      output_dir: z.string().optional().describe('Directory for saved screenshots'),
+      ref: z.string().optional().describe('Element ref or CSS selector to screenshot'),
+      full_page: z.boolean().optional().describe('Capture full page (default: true)'),
+      clip: z.object({
+        x: z.number(),
+        y: z.number(),
+        width: z.number(),
+        height: z.number(),
+      }).optional().describe('Clip region {x, y, width, height}'),
+    },
+    async ({ prompt, company, position, output_dir, ref, full_page, clip }) => {
+      await bm.ensureBrowser();
+      const screenshotPath = buildVisionScreenshotPath(company, position, output_dir);
+
+      try {
+        const ext = bm.getExtension();
+        if (ext) {
+          const res = await bm.extSend<{ data: string; mimeType: string }>('screenshot');
+          fs.writeFileSync(screenshotPath, Buffer.from(res.data, 'base64'));
+        } else {
+          const page = bm.getPage();
+
+          if (ref) {
+            const resolved = await bm.resolveRef(ref);
+            const locator = 'locator' in resolved ? resolved.locator : page.locator(resolved.selector);
+            await locator.screenshot({ path: screenshotPath, timeout: 5000 });
+          } else if (clip) {
+            await page.screenshot({ path: screenshotPath, clip });
+          } else {
+            await page.screenshot({ path: screenshotPath, fullPage: full_page !== false });
+          }
+        }
+
+        const kimiBin = process.env.KIMI_BIN || 'kimi';
+        const kimiPrompt = `${prompt}: ${screenshotPath}`;
+        const { stdout, stderr } = await execFileAsync(kimiBin, ['-p', kimiPrompt], {
+          maxBuffer: 10 * 1024 * 1024,
+        });
+        const output = [stdout.trim(), stderr.trim()].filter(Boolean).join('\n');
+
+        return {
+          content: [
+            { type: 'text' as const, text: `Screenshot saved: ${screenshotPath}\n\n${output}` },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [
+            { type: 'text' as const, text: `Screenshot saved: ${screenshotPath}\n\nKimi CLI failed: ${wrapError(err)}` },
+          ],
+          isError: true,
+        };
       }
     }
   );

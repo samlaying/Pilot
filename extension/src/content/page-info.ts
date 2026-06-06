@@ -19,16 +19,17 @@ export function pageText(): { text: string; url: string; title: string } {
 
 export interface PageHtmlOptions {
   selector?: string;
+  maxChars?: number;
 }
 
 export function pageHtml(opts: PageHtmlOptions = {}): { html: string } {
-  const { selector } = opts;
+  const { selector, maxChars = 50_000 } = opts;
   if (selector) {
     const el = document.querySelector(selector);
     if (!el) throw new Error(`Selector not found: ${selector}`);
-    return { html: el.innerHTML };
+    return { html: el.innerHTML.slice(0, maxChars) };
   }
-  return { html: document.documentElement.outerHTML.slice(0, 50000) };
+  return { html: document.documentElement.outerHTML.slice(0, maxChars) };
 }
 
 export function pageLinks(): { links: Array<{ text: string; href: string }>; count: number } {

@@ -152,6 +152,11 @@ Errors:
       await bm.ensureBrowser();
       try {
         const wrapped = wrapForEvaluate(expression);
+        const ext = bm.getExtension();
+        if (ext) {
+          const result = await bm.extSend<{ result: string }>('evaluate', { script: wrapped });
+          return { content: [{ type: 'text' as const, text: result.result }] };
+        }
         const result = await bm.getPage().evaluate(wrapped);
         const text = typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result ?? '');
         return { content: [{ type: 'text' as const, text }] };

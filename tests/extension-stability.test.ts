@@ -126,7 +126,7 @@ function loadBackground(initialTabs: FakeTab[]) {
     Date,
   };
 
-  const source = fs.readFileSync(path.join(ROOT, 'extension/background.js'), 'utf8');
+  const source = fs.readFileSync(path.join(ROOT, 'extension/dist/background.js'), 'utf8');
   vm.createContext(context);
   vm.runInContext(source, context);
   return { context: context as typeof context & { handleCommand: Function }, tabs, chrome };
@@ -158,9 +158,9 @@ describe('extension tab stability', () => {
 
 describe('broker extension routing stability', () => {
   const source = fs.readFileSync(path.join(ROOT, 'src/extension-server.ts'), 'utf8');
-  const backgroundSource = fs.readFileSync(path.join(ROOT, 'extension/background.js'), 'utf8');
-  const contentSource = fs.readFileSync(path.join(ROOT, 'extension/content.js'), 'utf8');
-  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'extension/manifest.json'), 'utf8'));
+  const backgroundSource = fs.readFileSync(path.join(ROOT, 'extension/dist/background.js'), 'utf8');
+  const contentSource = fs.readFileSync(path.join(ROOT, 'extension/dist/content.js'), 'utf8');
+  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'extension/dist/manifest.json'), 'utf8'));
 
   it('preserves caller-provided tab overrides when forwarding through the broker', () => {
     expect(source).toContain('const tabId = msg.tabId ?? this.sessionTabs.get(sessionId);');
@@ -175,25 +175,25 @@ describe('broker extension routing stability', () => {
   it('uses an offscreen document and alarm fallback to keep the MV3 service worker awake', () => {
     expect(manifest.permissions).toContain('offscreen');
     expect(manifest.permissions).toContain('alarms');
-    expect(fs.existsSync(path.join(ROOT, 'extension/offscreen.html'))).toBe(true);
-    expect(fs.existsSync(path.join(ROOT, 'extension/offscreen.js'))).toBe(true);
+    expect(fs.existsSync(path.join(ROOT, 'extension/dist/offscreen.html'))).toBe(true);
+    expect(fs.existsSync(path.join(ROOT, 'extension/dist/offscreen.js'))).toBe(true);
     expect(backgroundSource).toContain('ensureOffscreen()');
-    expect(backgroundSource).toContain("msg.type === 'offscreen_keepalive'");
+    expect(backgroundSource).toMatch(/msg\.type === ["']offscreen_keepalive["']/);
     expect(backgroundSource).toContain("chrome.alarms.create(RECONNECT_ALARM");
   });
 
   it('routes portal text clicks and file uploads through the extension content script', () => {
     expect(manifest.permissions).toContain('debugger');
-    expect(backgroundSource).toContain("case 'click_text':");
-    expect(backgroundSource).toContain("case 'dom_find':");
+    expect(backgroundSource).toMatch(/type === ["']click_text["']/);
+    expect(contentSource).toMatch(/case ["']dom_find["']:/);
     expect(backgroundSource).toContain('Input.dispatchMouseEvent');
-    expect(backgroundSource).toContain("relayToContent('find_text_rect'");
-    expect(backgroundSource).toContain("case 'upload_file':");
-    expect(contentSource).toContain("case 'dom_find':");
+    expect(backgroundSource).toMatch(/relayToContent\(["']find_text_rect["']/);
+    expect(contentSource).toMatch(/case ["']upload_file["']:/);
+    expect(contentSource).toMatch(/case ["']dom_find["']:/);
     expect(contentSource).toContain('function domFind');
     expect(contentSource).toContain('clickSelector: cssPath(clickTarget)');
     expect(contentSource).toContain('function findVisibleTextElement');
-    expect(contentSource).toContain("case 'find_text_rect':");
+    expect(contentSource).toMatch(/case ["']find_text_rect["']:/);
     expect(contentSource).toContain('new DataTransfer()');
     expect(contentSource).toContain('input.files = dt.files');
   });

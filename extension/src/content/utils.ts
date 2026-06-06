@@ -7,7 +7,10 @@ export function resolveElement(ref: string | undefined, selector: string | undef
   if (ref && ref.startsWith('@')) {
     return document.querySelector(`[data-pilot-ref="${ref.slice(1)}"]`);
   }
+  // Prefer explicit selector parameter, but also accept ref as a CSS selector fallback
+  // (e.g. pilot_click(ref=".my-class") sends ref only, not selector)
   if (selector) return document.querySelector(selector);
+  if (ref) return document.querySelector(ref);
   return null;
 }
 

@@ -2,6 +2,7 @@
  * DOM interaction commands: click, fill, type, press, scroll, hover, select.
  */
 
+import { adaptiveResolveElement, rememberResolvedElement } from './adaptive-locator';
 import { resolveElement, sleep, fireMouseEvent, buttonIndex } from './utils';
 
 // ─── Click ────────────────────────────────────────────────────
@@ -17,9 +18,18 @@ export interface ClickOptions {
 
 export async function click(opts: ClickOptions): Promise<{ clicked: string }> {
   const { ref, selector, x, y, button = 'left', double_click = false } = opts;
-  const el = resolveElement(ref, selector);
+  let el = resolveElement(ref, selector);
+  let adaptiveReason = '';
+  if (!el) {
+    const adaptive = adaptiveResolveElement(ref, selector);
+    if (adaptive) {
+      el = adaptive.element;
+      adaptiveReason = ` (${adaptive.reason})`;
+    }
+  }
 
   if (el) {
+    rememberResolvedElement(ref, selector, el);
     el.scrollIntoView({ block: 'center', behavior: 'instant' });
     await sleep(50);
     const rect = el.getBoundingClientRect();
@@ -27,13 +37,39 @@ export async function click(opts: ClickOptions): Promise<{ clicked: string }> {
     const cy = rect.top + rect.height / 2;
     fireMouseEvent(el, 'mousedown', cx, cy, button);
     fireMouseEvent(el, 'mouseup', cx, cy, button);
-    if (double_click) {
+
+    // React synthetic event fix: for checkbox/radio inputs, React intercepts
+    // the `checked` property setter. Direct assignment won't trigger onChange.
+    // Use the native setter via Object.getOwnPropertyDescriptor to bypass React's
+    // monkey-patched setter, then dispatch bubbling events so React's root-level
+    // listener picks up the state change. This mirrors the approach used in fill()
+    // for text input values.
+    if (!double_click && el.tagName === 'INPUT') {
+      const inputEl = el as HTMLInputElement;
+      if (inputEl.type === 'checkbox' || inputEl.type === 'radio') {
+        if (inputEl.disabled) throw new Error('Element is disabled');
+        const nativeCheckedSetter = Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype, 'checked'
+        )?.set;
+        const nextChecked = inputEl.type === 'radio' ? true : !inputEl.checked;
+        if (nativeCheckedSetter) {
+          nativeCheckedSetter.call(inputEl, nextChecked);
+        } else {
+          inputEl.checked = nextChecked;
+        }
+        inputEl.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: buttonIndex(button) }));
+        inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+        inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+      } else {
+        (el as HTMLElement).click();
+      }
+    } else if (double_click) {
       el.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, button: buttonIndex(button) }));
     } else {
       (el as HTMLElement).click();
     }
     await sleep(100);
-    return { clicked: ref || selector || '' };
+    return { clicked: `${ref || selector || ''}${adaptiveReason}` };
   } else if (x !== undefined && y !== undefined) {
     const target = document.elementFromPoint(x, y);
     if (target) {
