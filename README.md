@@ -1,8 +1,10 @@
 # pilot — AI agents in your real Chrome
 
+[English](README.md) | [中文](README.zh-CN.md) | [日本語](README.ja.md) | [한국어](README.ko.md)
+
 [![npm](https://img.shields.io/npm/v/pilot-mcp)](https://www.npmjs.com/package/pilot-mcp)
-[![license](https://img.shields.io/github/license/TacosyHorchata/Pilot)](https://github.com/TacosyHorchata/Pilot/blob/main/LICENSE)
-[![stars](https://img.shields.io/github/stars/TacosyHorchata/Pilot)](https://github.com/TacosyHorchata/Pilot)
+[![license](https://img.shields.io/github/license/samlaying/Pilot)](https://github.com/samlaying/Pilot/blob/main/LICENSE)
+[![stars](https://img.shields.io/github/stars/samlaying/Pilot)](https://github.com/samlaying/Pilot)
 
 > Install a Chrome extension. Your AI agent gets a tab in the browser you're already using.
 
@@ -122,7 +124,7 @@ Most LLMs degrade past ~30 tools. Load only what you need:
 }
 ```
 
-Default: `standard`. [Full tool reference →](https://github.com/TacosyHorchata/Pilot/wiki/Tools)
+Default: `standard`. [Full tool reference →](https://github.com/samlaying/Pilot/wiki/Tools)
 
 ---
 
@@ -160,6 +162,6 @@ Core architecture — ref-based element selection, snapshot diffing, annotated s
 
 ---
 
-If Pilot is useful, [star the repo](https://github.com/TacosyHorchata/Pilot) — it helps others find it.
+If Pilot is useful, [star the repo](https://github.com/samlaying/Pilot) — it helps others find it.
 
 <!-- Keywords: MCP browser automation, Playwright MCP alternative, pilot-mcp, Claude Code browser, Cursor browser automation, MCP server, AI browser automation, web automation AI agent, browser automation for LLMs, cookie import MCP, Model Context Protocol browser, npx pilot-mcp, Chrome extension MCP, real browser AI agent, authenticated browser agent, Cloudflare bypass MCP -->

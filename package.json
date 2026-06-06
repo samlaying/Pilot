@@ -51,9 +51,9 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/TacosyHorchata/pilot.git"
+    "url": "https://github.com/samlaying/Pilot.git"
   },
-  "homepage": "https://github.com/TacosyHorchata/pilot",
+  "homepage": "https://github.com/samlaying/Pilot",
   "author": "Pedro Rios",
   "license": "MIT",
   "devDependencies": {
