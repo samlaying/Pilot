@@ -5,7 +5,7 @@
  * that may not appear in the accessibility snapshot.
  */
 
-import { sleep, fireMouseEvent, isVisible } from './utils';
+import { sleep, fireMouseEvent, isVisible, getElementText } from './utils';
 
 // ─── Public API ──────────────────────────────────────────────
 
@@ -165,6 +165,3 @@ export function findClickableAncestor(el: Element): Element | null {
     .sort((a, b) => b.score - a.score)[0]?.candidate || null;
 }
 
-function getElementText(el: Element): string {
-  return 'innerText' in el ? String(el.innerText || '') : (el.textContent || '');
-}

@@ -2,9 +2,9 @@
  * DOM querying: deep search, element finding, state inspection, and waiting.
  */
 
-import { resolveElement, isVisible, sleep } from './utils';
+import { resolveElement, isVisible, sleep, getElementText, inferRole } from './utils';
 import { normalizeText, findClickableAncestor, scoreTextClickCandidate } from './text-matching';
-import { inferRole, incrementRefCounter } from './snapshot';
+import { incrementRefCounter } from './snapshot';
 
 // ─── DOM Find ────────────────────────────────────────────────
 
@@ -216,8 +216,4 @@ function cssPath(el: Element): string {
     current = parent;
   }
   return parts.length ? parts.join(' > ') : current?.tagName?.toLowerCase() || '';
-}
-
-function getElementText(el: Element): string {
-  return 'innerText' in el ? String(el.innerText || '') : (el.textContent || '');
 }

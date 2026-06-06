@@ -6,7 +6,7 @@
  */
 
 import { rememberElement } from './adaptive-locator';
-import { truncate } from './utils';
+import { truncate, inferRole, getAccessibleName } from './utils';
 
 /** Current ref counter value (read-only from outside; use incrementRefCounter to change). */
 export let refCounter = 0;
@@ -135,42 +135,6 @@ export function snapshot(opts: SnapshotOptions = {}): SnapshotResult {
 
   visit(document.body, 0);
   return { text: lines.join('\n') || '(no accessible elements found)', url: location.href, title: document.title, count };
-}
-
-/** Map a tag name to its inferred ARIA role. */
-export function inferRole(el: Element): string {
-  const tag = el.tagName.toLowerCase();
-  const type = (el as HTMLInputElement).type?.toLowerCase();
-  switch (tag) {
-    case 'a':        return 'link';
-    case 'button':   return 'button';
-    case 'input':    return type === 'checkbox' ? 'checkbox' : type === 'radio' ? 'radio' : type === 'submit' ? 'button' : 'textbox';
-    case 'select':   return 'combobox';
-    case 'textarea': return 'textbox';
-    case 'h1': case 'h2': case 'h3': case 'h4': case 'h5': case 'h6': return 'heading';
-    case 'nav':      return 'navigation';
-    case 'main':     return 'main';
-    default:         return tag;
-  }
-}
-
-/** Get the accessible name for an element (aria-label, placeholder, title, etc.). */
-export function getAccessibleName(el: Element): string | null {
-  // aria-labelledby takes highest priority
-  const labelledBy = el.getAttribute('aria-labelledby');
-  if (labelledBy) {
-    const text = labelledBy.split(/\s+/).map(id => document.getElementById(id)?.textContent?.trim()).filter(Boolean).join(' ');
-    if (text) return text;
-  }
-  return (
-    el.getAttribute('aria-label') ||
-    el.getAttribute('placeholder') ||
-    el.getAttribute('title') ||
-    el.getAttribute('alt') ||
-    (el.id && document.querySelector(`label[for="${el.id}"]`)?.textContent?.trim()) ||
-    el.textContent?.trim().slice(0, 100) ||
-    null
-  );
 }
 
 /** Extract element properties (disabled, checked, expanded, etc.) as a display string. */

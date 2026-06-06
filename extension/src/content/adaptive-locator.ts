@@ -6,7 +6,7 @@
  * require a stronger match.
  */
 
-import { isVisible } from './utils';
+import { isVisible, inferRole, getAccessibleName, cssEscape } from './utils';
 
 export interface ElementFingerprint {
   ref: string;
@@ -105,7 +105,7 @@ function fingerprintElement(ref: string, el: Element): ElementFingerprint {
   return {
     ref,
     origin: location.origin,
-    role: getRole(el),
+    role: inferRole(el),
     tag: el.tagName.toLowerCase(),
     type: inputEl.type?.toLowerCase() || '',
     name: normalize(getAccessibleName(el) || ''),
@@ -146,51 +146,6 @@ function scoreFingerprint(original: ElementFingerprint, candidate: ElementFinger
 
 function weighted(score: number, weight: number): number {
   return Math.max(0, Math.min(1, score)) * weight;
-}
-
-function getRole(el: Element): string {
-  const explicit = el.getAttribute('role');
-  if (explicit) return explicit.toLowerCase();
-  const tag = el.tagName.toLowerCase();
-  const type = (el as HTMLInputElement).type?.toLowerCase();
-  if (tag === 'a') return 'link';
-  if (tag === 'button') return 'button';
-  if (tag === 'input') {
-    if (type === 'checkbox') return 'checkbox';
-    if (type === 'radio') return 'radio';
-    if (type === 'submit' || type === 'button') return 'button';
-    return 'textbox';
-  }
-  if (tag === 'select') return 'combobox';
-  if (tag === 'textarea') return 'textbox';
-  if (tag === 'label') return 'label';
-  return tag;
-}
-
-function getAccessibleName(el: Element): string {
-  const labelledBy = el.getAttribute('aria-labelledby');
-  if (labelledBy) {
-    const text = labelledBy
-      .split(/\s+/)
-      .map(id => document.getElementById(id)?.textContent?.trim())
-      .filter(Boolean)
-      .join(' ');
-    if (text) return text;
-  }
-
-  const inputEl = el as HTMLInputElement;
-  const labels = inputEl.labels ? Array.from(inputEl.labels).map(label => label.textContent?.trim()).filter(Boolean).join(' ') : '';
-  if (labels) return labels;
-
-  return (
-    el.getAttribute('aria-label') ||
-    el.getAttribute('placeholder') ||
-    el.getAttribute('title') ||
-    el.getAttribute('alt') ||
-    (inputEl.id && document.querySelector(`label[for="${cssEscape(inputEl.id)}"]`)?.textContent?.trim()) ||
-    el.textContent?.trim() ||
-    ''
-  );
 }
 
 function stableAttrs(el: Element): Record<string, string> {
@@ -280,8 +235,4 @@ function levenshtein(a: string, b: string): number {
     prev.splice(0, prev.length, ...curr);
   }
   return prev[b.length];
-}
-
-function cssEscape(value: string): string {
-  return typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(value) : value.replace(/["\\]/g, '\\$&');
 }
